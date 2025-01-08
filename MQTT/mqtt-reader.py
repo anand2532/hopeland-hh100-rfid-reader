@@ -1,64 +1,72 @@
 import paho.mqtt.client as mqtt
-import time
-import logging
+import json
+from datetime import datetime
+class RFIDTagTracker:
+    def init(self):
+        self.tags = {}
+        self.total_reads = 0
+    def update_tag(self, tag):
+        epc = tag['epc']
+        device_timestamp = datetime.strptime(tag['timestamp'], '%Y-%m-%d %H:%M:%S.%f')
 
-# Set up logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+        # Increment total reads
+        self.total_reads += 1
 
-def on_connect(client, userdata, flags, rc):
-    """Called when client connects to broker"""
-    if rc == 0:
-        logger.info("Successfully connected to MQTT broker")
-        client.subscribe("rfid/tags")  # Subscribe to topic
-        logger.info("Subscribed to rfid/tags")
-    else:
-        logger.error(f"Connection failed with code {rc}")
-
+        if epc not in self.tags:
+            
+            self.tags[epc] = {
+                'epc': epc,
+                'first_timestamp': device_timestamp,
+                'last_timestamp': device_timestamp,
+                'count': 1,
+                'latest_rssi': tag['rssi'],
+                'antenna': tag['ant'],
+                'serialno': tag['serialno']
+            }
+        else:
+            # Update existing tag
+            tag_info = self.tags[epc]
+            tag_info['count'] += 1
+            tag_info['last_timestamp'] = device_timestamp
+            tag_info['latest_rssi'] = tag['rssi']
+    def get_tag_report(self):
+        return {
+            'total_reads': self.total_reads,
+            'total_unique_tags': len(self.tags),
+            'tags': list(self.tags.values())
+        }
+def on_connect(client, userdata, flags, reason_code, properties):
+    print("Connected to MQTT Broker")
+    client.subscribe("rfid/tags")
 def on_message(client, userdata, msg):
-    """Called when message is received"""
-    logger.info(f"Received message: {msg.payload.decode()} on topic: {msg.topic}")
+    try:
+        payload = json.loads(msg.payload.decode())
+        tracker = client.rfid_tracker
+        # Handle both single tag and multiple tags
+        tags = payload if isinstance(payload, list) else [payload]
 
-def on_publish(client, userdata, mid):
-    """Called when message is published"""
-    logger.info("Message published successfully")
-
-# Create MQTT client
-client = mqtt.Client()
-
-# Set callbacks
-client.on_connect = on_connect
-client.on_message = on_message
-client.on_publish = on_publish
-
-try:
-    # Connect to broker
-    logger.info("Connecting to broker...")
-    client.connect("localhost", 1883, 60)
-    
-    # Start network loop in background thread
-    client.loop_start()
-    
-    # Wait for connection to establish
-    time.sleep(2)
-    
-    # Publish a test message
-    logger.info("Publishing test message...")
-    client.publish("rfid/tags", "Test message from Python")
-    
-    # Keep script running
-    logger.info("Listening for messages... (Press Ctrl+C to exit)")
-    while True:
-        time.sleep(1)
-
-except KeyboardInterrupt:
-    logger.info("Shutting down...")
-    client.loop_stop()
-    client.disconnect()
-except Exception as e:
-    logger.error(f"Error occurred: {e}")
-    client.loop_stop()
-    client.disconnect()
-
-
-
+        # Update tags
+        for tag in tags:
+            tracker.update_tag(tag)
+        # Get and print current tag report
+        report = tracker.get_tag_report()
+        print("\nReal-time RFID Tag Status:")
+        print(json.dumps(report, indent=2, default=str))
+        print("-" * 60)
+    except Exception as e:
+        print(f"Error processing message: {e}")
+def main():
+    client = mqtt.Client(protocol=mqtt.MQTTv5)
+    client.rfid_tracker = RFIDTagTracker()
+    client.on_connect = on_connect
+    client.on_message = on_message
+    try:
+        client.connect("localhost", 1883)
+        client.loop_forever()
+    except KeyboardInterrupt:
+        print("\nExiting...")
+        client.disconnect()
+    except Exception as e:
+        print(f"Connection error: {e}")
+if __name__ == "main":
+    main()
